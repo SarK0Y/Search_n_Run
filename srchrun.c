@@ -28,6 +28,22 @@ static char *trim(char *s)
     return s;
 }
 
+static char *expand_home(const char *value)
+{
+    if (value[0] != '~' || (value[1] != '\0' && value[1] != '/'))
+        return strdup(value);
+
+    const char *home = getenv("HOME");
+    if (!home)
+        home = "";
+
+    char *out = malloc(strlen(home) + strlen(value));
+    if (!out)
+        return NULL;
+    sprintf(out, "%s%s", home, value + 1);
+    return out;
+}
+
 static int run_command(const char *cmd, const char *filename,
                        const char *pattern)
 {
@@ -68,7 +84,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "Usage: %s [-vars /path/to/file.vars]\n", argv[0]);
         return 2;
     }
-
+	
     FILE *config = fopen(config_path, "r");
     if (!config) {
         perror(config_path);
@@ -85,7 +101,6 @@ int main(int argc, char **argv)
     while (fgets(line, sizeof line, config)) {
         line_number++;
         char *entry = trim(line);
-
         if (*entry == '\0' || *entry == '#')
             continue;
 
@@ -100,6 +115,14 @@ int main(int argc, char **argv)
         *equals = '\0';
         char *name = trim(entry);
         char *value = trim(equals + 1);
+
+        char *expanded = expand_home(value);
+        if (!expanded) {
+            perror("strdup");
+            fclose(config);
+            return 1;
+        }
+        value = expanded;
 
         if (*name == '\0') {
             fprintf(stderr, "%s:%u: empty variable name\n",
@@ -134,6 +157,8 @@ int main(int argc, char **argv)
             fclose(config);
             return 1;
         }
+
+        free(expanded);
     }
     fclose(config);
 
