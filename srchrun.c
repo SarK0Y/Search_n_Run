@@ -1,6 +1,7 @@
 //Duck.ai + OpenCode
 #define _POSIX_C_SOURCE 200809L
 
+#include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <regex.h>
@@ -41,6 +42,60 @@ static char *expand_home(const char *value)
     if (!out)
         return NULL;
     sprintf(out, "%s%s", home, value + 1);
+    return out;
+}
+
+struct kv {
+    char *name;
+    char *value;
+};
+
+/* Replace $NAME with the value from the config table.
+   Unknown names and $1/$2 stay for the shell. */
+static char *expand_vars(const char *s, const struct kv *vars, size_t nvars)
+{
+    size_t cap = strlen(s) + 1, len = 0;
+    char *out = malloc(cap);
+    if (!out)
+        return NULL;
+
+    while (*s) {
+        const char *text = s;
+        size_t text_len = 1;
+
+        if (*s == '$' && (isalpha((unsigned char)s[1]) || s[1] == '_')) {
+            const char *name = ++s;
+            while (isalnum((unsigned char)*s) || *s == '_')
+                s++;
+            size_t name_len = s - name;
+
+            text = s - name_len - 1; /* keep "$NAME" if unknown */
+            text_len = name_len + 1;
+            for (size_t i = nvars; i-- > 0; ) { /* last definition wins */
+                if (strlen(vars[i].name) == name_len &&
+                    memcmp(vars[i].name, name, name_len) == 0) {
+                    text = vars[i].value;
+                    text_len = strlen(text);
+                    break;
+                }
+            }
+        } else {
+            s++;
+        }
+
+        while (len + text_len + 1 > cap) {
+            cap = (len + text_len + 1) * 2;
+            char *n = realloc(out, cap);
+            if (!n) {
+                free(out);
+                return NULL;
+            }
+            out = n;
+        }
+        memcpy(out + len, text, text_len);
+        len += text_len;
+    }
+    out[len] = '\0';
     return out;
 }
 
@@ -95,6 +150,8 @@ int main(int argc, char **argv)
     char *directory = NULL;
     char *command = NULL;
     char *timeout_text = NULL;
+    struct kv *vars = NULL;
+    size_t nvars = 0;
     char line[LINE_SIZE];
     unsigned line_number = 0;
 
@@ -143,10 +200,6 @@ int main(int argc, char **argv)
         } else if (strcmp(name, "TIME_OUT") == 0) {
             free(timeout_text);
             timeout_text = strdup(value);
-        } else if (setenv(name, value, 1) != 0) {
-            perror("setenv");
-            fclose(config);
-            return 1;
         }
 
         if ((strcmp(name, "REGEX") == 0 && !pattern) ||
@@ -158,6 +211,24 @@ int main(int argc, char **argv)
             return 1;
         }
 
+        /* Keep the raw config values in a table for $NAME substitution;
+           nothing is exported, so the real environment stays untouched. */
+        struct kv *grown = realloc(vars, (nvars + 1) * sizeof *vars);
+        if (!grown) {
+            perror("realloc");
+            fclose(config);
+            return 1;
+        }
+        vars = grown;
+        vars[nvars].name = strdup(name);
+        vars[nvars].value = strdup(value);
+        if (!vars[nvars].name || !vars[nvars].value) {
+            perror("strdup");
+            fclose(config);
+            return 1;
+        }
+        nvars++;
+
         free(expanded);
     }
     fclose(config);
@@ -166,6 +237,21 @@ int main(int argc, char **argv)
         fprintf(stderr, "file.vars must define REGEX and CMD\n");
         return 1;
     }
+
+    /* Substitute $NAME in CMD with the config values. */
+    char *expanded_cmd = expand_vars(command, vars, nvars);
+    for (size_t i = 0; i < nvars; i++) {
+        free(vars[i].name);
+        free(vars[i].value);
+    }
+    free(vars);
+    if (!expanded_cmd) {
+        perror("malloc");
+        return 1;
+    }
+    free(command);
+    command = expanded_cmd;
+
     if (!directory)
         directory = strdup(".");
     if (!directory) {
